@@ -591,7 +591,34 @@
         function createStoreKey(storeNumber, dayOfWeek) {
             return `${storeNumber}_${dayOfWeek}`;
         }
-        function getBrandSequence(brandName) {
+        function extractBrandAndTC(directionStr) {
+            const str = String(directionStr || '');
+            const parts = str.split('/').map(p => p.trim());
+            if (parts.length >= 2) {
+                return {
+                    brand: parts[0],
+                    tc: parts[1]
+                };
+            }
+            return {
+                brand: str,
+                tc: ''
+            };
+        }
+        function getTCSequence(tc) {
+            const tcStr = String(tc || '').toUpperCase();
+            if (!tc || tc === '') {
+                return 999;
+            }
+            return 1;
+        }
+        function isRegionalTransport(transport) {
+            const transportStr = String(transport || '').toUpperCase();
+            return transportStr.includes('ПЛ.') || transportStr.includes('ЕКАТЕРИНБУРГ') || 
+                   transportStr.includes('НОВОСИБИРСК') || transportStr.includes('КАЗАНЬ') ||
+                   !MOSCOW_BRANDS.some(brand => transportStr.includes(brand));
+        }
+                function getBrandSequence(brandName) {
             const brandStr = String(brandName || '').toUpperCase();
             
             if (brandStr.includes('ВИЛЕТ') || brandStr.includes('VILET')) {
@@ -731,7 +758,7 @@
                                 palletMap.get(palletKey).boxes.add(String(box));
                             }
                         });
-                        const result = Array.from(palletMap.values()).map(palletData => {
+                        const result = Array.from(palletMap.values()).map((palletData, index) => {
                             const orderNumber = palletData.orderNumber;
                             const storeNumber = palletData.storeNumber;
                             const direction = palletData.direction;
@@ -739,23 +766,32 @@
                             const place = palletData.place;
                             const boxesCount = palletData.boxes.size;
                             const dispatchDate = palletData.dispatchDate;
+                            
+                            const { brand, tc } = extractBrandAndTC(direction);
+                            const tcSequence = getTCSequence(tc);
                             const brandSequence = getBrandSequence(direction);
                             const comment = getComment(orderNumber, file3Data);
                             const brandFilterPriority = getBrandFilterPriority(direction);
+                            
                             return {
                                 transport: flightNumber || '',
                                 storeNumber: storeNumber || '',
                                 brand: direction || '',
+                                brandName: brand,
+                                tc: tc,
                                 place: place || '',
                                 quantity: boxesCount,
+                                tcSequence: tcSequence,
                                 brandSequence: brandSequence,
-                                internalSequence: 1,
+                                internalSequence: index + 1,
                                 internalSequenceText: 'Текстиль',
                                 comment: comment,
                                 brandFilterPriority: brandFilterPriority,
-                                source: 'REPORT'
+                                source: 'REPORT',
+                                originalIndex: index
                             };
                         });
+                        const posmRecords = [];
                         if (file3Data && file3Data.length > 0) {
                             file3Data.forEach(posmRow => {
                                 const raceNumber = getColumnValue(posmRow, 'Рейс', 'рейс', 'Трак', 'трак');
@@ -766,7 +802,10 @@
                                 const name = getColumnValue(posmRow, 'Наименование', 'наименование');
                                 const size = getColumnValue(posmRow, 'Размер', 'размер');
                                 const weight = getColumnValue(posmRow, 'Вес', 'вес');
+                                const quantity = getColumnValue(posmRow, 'Кол-во', 'количество', 'кол-во кор', 'Кол-во кор');
+                                
                                 if (!raceNumber) return;
+                                
                                 let internalSequence = 4;
                                 if (sequence && !isNaN(parseInt(sequence))) {
                                     internalSequence = parseInt(sequence);
@@ -778,19 +817,29 @@
                                         internalSequence = 2;
                                     }
                                 }
+                                
                                 let commentParts = [];
+                                commentParts.push('POSM');
                                 if (name) commentParts.push(String(name));
                                 if (size) commentParts.push(String(size));
                                 if (weight) commentParts.push(String(weight));
                                 const posmComment = commentParts.join(' ');
-                                const brandSequence = getBrandSequence(brandName || regionDelivery);
-                                const brandFilterPriority = getBrandFilterPriority(brandName || regionDelivery);
-                                result.push({
+                                
+                                const fullBrand = brandName || regionDelivery || '';
+                                const { brand, tc } = extractBrandAndTC(fullBrand);
+                                const tcSequence = getTCSequence(tc);
+                                const brandSequence = getBrandSequence(fullBrand);
+                                const brandFilterPriority = getBrandFilterPriority(fullBrand);
+                                
+                                posmRecords.push({
                                     transport: raceNumber || '',
                                     storeNumber: storeNumber || '',
-                                    brand: `${brandName || regionDelivery || ''} POSM`,
+                                    brand: fullBrand,
+                                    brandName: brand,
+                                    tc: tc,
                                     place: '',
-                                    quantity: 1,
+                                    quantity: quantity ? parseInt(quantity) : 1,
+                                    tcSequence: tcSequence,
                                     brandSequence: brandSequence,
                                     internalSequence: internalSequence,
                                     internalSequenceText: getInternalSequenceText(internalSequence),
@@ -800,52 +849,121 @@
                                 });
                             });
                         }
-                        result.sort((a, b) => {
-                            // Уровень 1: Сортировка по транспорту
-                            if (a.transport !== b.transport) {
-                                return String(a.transport).localeCompare(String(b.transport));
-                            }
-                            
-                            // Уровень 2: Последовательность Бренда в ТС (VILET=1, ECRU=2, DUB=3, MAAG=4)
-                            const seqA = a.brandSequence ?? 999;
-                            const seqB = b.brandSequence ?? 999;
-                            if (seqA !== seqB) {
-                                return seqA - seqB;
-                            }
-                            
-                            // Уровень 3: Последовательность внутри Бренда (Текстиль=1, Трансфер=5, POSM=6, Оборудование=7)
-                            const internalA = a.internalSequence ?? 999;
-                            const internalB = b.internalSequence ?? 999;
-                            return internalA - internalB;
-                        });
-                        // Перенумерация последовательности брендов внутри каждого рейса
-                        let currentTransport = null;
-                        let brandSequenceMap = new Map();
-                        let sequenceCounter = 0;
+                        
+                        const sortedResult = [];
+                        const transportGroups = new Map();
                         
                         result.forEach(row => {
+                            if (!transportGroups.has(row.transport)) {
+                                transportGroups.set(row.transport, []);
+                            }
+                            transportGroups.get(row.transport).push(row);
+                        });
+                        
+                        const sortedTransports = Array.from(transportGroups.keys()).sort();
+                        
+                        sortedTransports.forEach(transport => {
+                            const rows = transportGroups.get(transport);
+                            const isRegional = isRegionalTransport(transport);
+                            
+                            if (isRegional) {
+                                rows.sort((a, b) => {
+                                    if (a.tcSequence !== b.tcSequence) {
+                                        return a.tcSequence - b.tcSequence;
+                                    }
+                                    if (a.tc !== b.tc) {
+                                        return String(a.tc).localeCompare(String(b.tc));
+                                    }
+                                    return a.internalSequence - b.internalSequence;
+                                });
+                            } else {
+                                rows.sort((a, b) => {
+                                    const seqA = a.brandSequence ?? 999;
+                                    const seqB = b.brandSequence ?? 999;
+                                    if (seqA !== seqB) {
+                                        return seqA - seqB;
+                                    }
+                                    const internalA = a.internalSequence ?? 999;
+                                    const internalB = b.internalSequence ?? 999;
+                                    return internalA - internalB;
+                                });
+                            }
+                            
+                            sortedResult.push(...rows);
+                        });
+                        
+                        posmRecords.forEach(posm => {
+                            const matchingReportIndex = sortedResult.findIndex(row => 
+                                row.transport === posm.transport &&
+                                row.storeNumber === posm.storeNumber &&
+                                row.brandName === posm.brandName &&
+                                row.source === 'REPORT'
+                            );
+                            
+                            if (matchingReportIndex !== -1) {
+                                sortedResult.splice(matchingReportIndex + 1, 0, posm);
+                            } else {
+                                sortedResult.push(posm);
+                            }
+                        });
+                        
+                        let currentTransport = null;
+                        let tcSequenceMap = new Map();
+                        let brandSequenceMap = new Map();
+                        let internalCounter = 0;
+                        let tcCounter = 0;
+                        
+                        sortedResult.forEach((row, idx) => {
                             if (row.transport !== currentTransport) {
                                 currentTransport = row.transport;
+                                tcSequenceMap = new Map();
                                 brandSequenceMap = new Map();
-                                sequenceCounter = 0;
+                                internalCounter = 0;
+                                tcCounter = 0;
                             }
                             
-                            if (!brandSequenceMap.has(row.brandSequence)) {
-                                sequenceCounter++;
-                                brandSequenceMap.set(row.brandSequence, sequenceCounter);
-                            }
+                            const isRegional = isRegionalTransport(row.transport);
                             
-                            row.displayBrandSequence = brandSequenceMap.get(row.brandSequence);
+                            if (isRegional) {
+                                if (!tcSequenceMap.has(row.tc)) {
+                                    tcCounter++;
+                                    tcSequenceMap.set(row.tc, tcCounter);
+                                }
+                                row.displayBrandSequence = tcSequenceMap.get(row.tc);
+                                
+                                if (row.source === 'POSM') {
+                                    const prevRow = idx > 0 ? sortedResult[idx - 1] : null;
+                                    if (prevRow && prevRow.transport === row.transport && 
+                                        prevRow.storeNumber === row.storeNumber && 
+                                        prevRow.brandName === row.brandName) {
+                                        row.displayInternalSequence = prevRow.displayInternalSequence;
+                                    } else {
+                                        internalCounter++;
+                                        row.displayInternalSequence = internalCounter;
+                                    }
+                                } else {
+                                    internalCounter++;
+                                    row.displayInternalSequence = internalCounter;
+                                }
+                            } else {
+                                if (!brandSequenceMap.has(row.brandSequence)) {
+                                    tcCounter++;
+                                    brandSequenceMap.set(row.brandSequence, tcCounter);
+                                }
+                                row.displayBrandSequence = brandSequenceMap.get(row.brandSequence);
+                                row.displayInternalSequence = row.internalSequenceText;
+                            }
                         });
-                        processedData = result;
-                        const transports = new Set(result.map(r => r.transport));
-                        const brands = new Set(result.map(r => r.brand));
+                        
+                        processedData = sortedResult;
+                        const transports = new Set(sortedResult.map(r => r.transport));
+                        const brands = new Set(sortedResult.map(r => r.brand));
                         document.getElementById('statTotal').textContent = file1Data.length;
                         document.getElementById('statFiltered').textContent = filteredData.length;
                         document.getElementById('statTransports').textContent = transports.size;
                         document.getElementById('statBrands').textContent = brands.size;
                         document.getElementById('statsSection').classList.remove('hidden');
-                        displayPreview(result);
+                        displayPreview(sortedResult);
                         document.getElementById('downloadBtn').disabled = false;
                         document.getElementById('printBtn').disabled = false;
                         loadingDiv.remove();
@@ -873,7 +991,7 @@
                     <td>${row.place}</td>
                     <td>${row.quantity}</td>
                     <td>${row.displayBrandSequence}</td>
-                    <td>${row.internalSequenceText}</td>
+                    <td>${row.displayInternalSequence !== undefined ? row.displayInternalSequence : row.internalSequenceText}</td>
                     <td>${row.comment}</td>
                 `;
                 tbody.appendChild(tr);
@@ -900,7 +1018,7 @@
                     'Место': row.place,
                     'Кол-во кор': row.quantity,
                     'Последов-ть Бренда в ТС': row.displayBrandSequence,
-                    'Последов-ть внутри Бренда': row.internalSequenceText,
+                    'Последов-ть внутри Бренда': row.displayInternalSequence !== undefined ? row.displayInternalSequence : row.internalSequenceText,
                     'Коммент.': row.comment
                 }));
                 const ws = XLSX.utils.json_to_sheet(exportData);
