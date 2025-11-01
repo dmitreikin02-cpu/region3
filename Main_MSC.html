@@ -510,7 +510,7 @@
                     const data = new Uint8Array(e.target.result);
                     const workbook = XLSX.read(data, { type: 'array' });
                     const firstSheet = workbook.Sheets[workbook.SheetNames[0]];
-                    const jsonData = XLSX.utils.sheet_to_json(firstSheet);
+                    const jsonData = XLSX.utils.sheet_to_json(firstSheet, { defval: '' });
                     if (fileNumber === 1) {
                         file1Data = jsonData;
                     } else if (fileNumber === 2) {
@@ -535,17 +535,31 @@
             }
         }
         function normalizeColumnName(name) {
+            if (name === undefined || name === null || name === '') {
+                return '';
+            }
             return String(name).trim().toLowerCase();
         }
+        const normalizedRowCache = new WeakMap();
+        
         function findColumn(row, possibleNames) {
-            const normalizedRow = {};
-            Object.keys(row).forEach(key => {
-                normalizedRow[normalizeColumnName(key)] = row[key];
-            });
+            let normalizedRow = normalizedRowCache.get(row);
+            
+            if (!normalizedRow) {
+                normalizedRow = {};
+                Object.keys(row).forEach(key => {
+                    const normalized = normalizeColumnName(key);
+                    if (normalized) {
+                        normalizedRow[normalized] = row[key];
+                    }
+                });
+                normalizedRowCache.set(row, normalizedRow);
+            }
+            
             for (const name of possibleNames) {
                 const normalized = normalizeColumnName(name);
-                if (normalizedRow[normalized] !== undefined) {
-                    return row[Object.keys(row).find(k => normalizeColumnName(k) === normalized)];
+                if (normalized && normalizedRow[normalized] !== undefined) {
+                    return normalizedRow[normalized];
                 }
             }
             return null;
@@ -591,23 +605,31 @@
         function createStoreKey(storeNumber, dayOfWeek) {
             return `${storeNumber}_${dayOfWeek}`;
         }
+        const brandSequenceCache = new Map();
+        
         function getBrandSequence(brandName) {
-            const brandStr = String(brandName || '').toUpperCase();
+            if (!brandName) return 999;
+            
+            const cacheKey = String(brandName);
+            if (brandSequenceCache.has(cacheKey)) {
+                return brandSequenceCache.get(cacheKey);
+            }
+            
+            const brandStr = cacheKey.toUpperCase();
+            let result = 999;
             
             if (brandStr.includes('ВИЛЕТ') || brandStr.includes('VILET')) {
-                return 1;
-            }
-            if (brandStr.includes('ЭКРЮ') || brandStr.includes('ECRU')) {
-                return 2;
-            }
-            if (brandStr.includes('ДАБ') || brandStr.includes('DUB')) {
-                return 3;
-            }
-            if (brandStr.includes('МААГ') || brandStr.includes('MAAG')) {
-                return 4;
+                result = 1;
+            } else if (brandStr.includes('ЭКРЮ') || brandStr.includes('ECRU')) {
+                result = 2;
+            } else if (brandStr.includes('ДАБ') || brandStr.includes('DUB')) {
+                result = 3;
+            } else if (brandStr.includes('МААГ') || brandStr.includes('MAAG')) {
+                result = 4;
             }
             
-            return 999;
+            brandSequenceCache.set(cacheKey, result);
+            return result;
         }
         function getInternalSequence(flightNumber, file3Data) {
             if (!file3Data) {
@@ -665,18 +687,31 @@
             }
             return String(sequence);
         }
+        const brandFilterCache = new Map();
+        
         function getBrandFilterPriority(brandName) {
-            const brandStr = String(brandName || '').toUpperCase();
+            if (!brandName) return 999;
+            
+            const cacheKey = String(brandName);
+            if (brandFilterCache.has(cacheKey)) {
+                return brandFilterCache.get(cacheKey);
+            }
+            
+            const brandStr = cacheKey.toUpperCase();
+            let result = 999;
             
             for (const filter of BRAND_FILTERS) {
                 for (const keyword of filter.keywords) {
                     if (brandStr.includes(keyword.toUpperCase())) {
-                        return filter.priority;
+                        result = filter.priority;
+                        brandFilterCache.set(cacheKey, result);
+                        return result;
                     }
                 }
             }
             
-            return 999;
+            brandFilterCache.set(cacheKey, result);
+            return result;
         }
         function processData() {
             if (!file1Data || !file2Data) {
@@ -863,28 +898,34 @@
         function displayPreview(data) {
             const tbody = document.getElementById('previewBody');
             tbody.innerHTML = '';
+            
+            const fragment = document.createDocumentFragment();
             const displayData = data.slice(0, 100);
+            
             displayData.forEach(row => {
                 const tr = document.createElement('tr');
                 tr.innerHTML = `
-                    <td>${row.transport}</td>
-                    <td>${row.storeNumber}</td>
-                    <td>${row.brand}</td>
-                    <td>${row.place}</td>
-                    <td>${row.quantity}</td>
-                    <td>${row.displayBrandSequence}</td>
-                    <td>${row.internalSequenceText}</td>
-                    <td>${row.comment}</td>
+                    <td>${row.transport || ''}</td>
+                    <td>${row.storeNumber || ''}</td>
+                    <td>${row.brand || ''}</td>
+                    <td>${row.place || ''}</td>
+                    <td>${row.quantity || ''}</td>
+                    <td>${row.displayBrandSequence || ''}</td>
+                    <td>${row.internalSequenceText || ''}</td>
+                    <td>${row.comment || ''}</td>
                 `;
-                tbody.appendChild(tr);
+                fragment.appendChild(tr);
             });
+            
             if (data.length > 100) {
                 const tr = document.createElement('tr');
                 tr.innerHTML = `<td colspan="8" style="text-align: center; font-style: italic; color: var(--secondary);">
                     ... и еще ${data.length - 100} записей (будут включены в Excel файл)
                 </td>`;
-                tbody.appendChild(tr);
+                fragment.appendChild(tr);
             }
+            
+            tbody.appendChild(fragment);
             document.getElementById('previewSection').classList.remove('hidden');
         }
         function downloadExcel() {
@@ -934,6 +975,10 @@
             file2Data = null;
             file3Data = null;
             processedData = null;
+            
+            brandSequenceCache.clear();
+            brandFilterCache.clear();
+            
             document.getElementById('file1').value = '';
             document.getElementById('file2').value = '';
             document.getElementById('file3').value = '';
